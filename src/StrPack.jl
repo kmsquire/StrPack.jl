@@ -1,7 +1,7 @@
 module StrPack
 
 export @struct
-export pack, unpack, sizeof
+export pack, unpack, unpack!, sizeof
 export DataAlign
 export align_default, align_packed, align_packmax, align_structpack, align_table
 export align_x86_pc_linux_gnu, align_native
@@ -193,6 +193,58 @@ function unpack{T}(in::IO, ::Type{T})
     unpack(in, T, reg.asize, reg.strategy, reg.endianness)
 end
 
+function unpack!{T}(out::T, in::IO, asize::Dict, strategy::DataAlign, endianness::Symbol)
+    chktype(T)
+    tgtendianness = endianness_converters[endianness][2]
+    offset = 0
+    for (typ, name) in zip(T.types, T.names)
+        dims = get(asize, name, 1)
+        intyp = if typ <: AbstractArray
+            eltype(typ)
+        else
+            typ
+        end
+
+        # Skip padding before next field
+        pad = pad_next(offset,intyp,strategy) 
+        skip(in,pad)
+        offset += pad
+        offset += if intyp <: String
+            out.(name) = rstrip(convert(typ, read(in, Uint8, dims...)), ['\0']) 
+            prod(dims)
+        elseif !isempty(intyp.names)
+            if typ <: AbstractArray
+                item = Array(intyp, dims...)
+                for i in 1:prod(dims)
+                    item[i] = unpack(in, intyp)
+                end
+                out.(name) = item
+            else
+                out.(name) = unpack(in, intyp)
+            end
+            calcsize(intyp)*prod(dims)
+        else
+            if typ <: AbstractArray
+                out.(name) = map(tgtendianness, read(in, intyp, dims...)) 
+            else
+                out.(name) = tgtendianness(read(in, intyp)) 
+            end
+            sizeof(intyp)*prod(dims)
+        end
+    end
+    skip(in, pad_next(offset, T, strategy))
+    out
+end
+function unpack!{T}(out::T, in::IO, endianness::Symbol)
+    reg = STRUCT_REGISTRY[T]
+    unpack(in, out, reg.asize, reg.strategy, endianness)
+end
+function unpack!{T}(out::T, in::IO)
+    reg = STRUCT_REGISTRY[T]
+    unpack(in, out, reg.asize, reg.strategy, reg.endianness)
+end
+
+
 function pack{T}(out::IO, struct::T, asize::Dict, strategy::DataAlign, endianness::Symbol)
     chktype(T)
     tgtendianness = endianness_converters[endianness][1]
@@ -254,6 +306,7 @@ pack{T}(struct::T, a::Dict, s::DataAlign, n::Symbol) = @withIOBuffer iostr pack(
 pack{T}(struct::T) = @withIOBuffer iostr pack(iostr, struct)
 
 unpack{T}(str::Union(String, Array{Uint8,1}), ::Type{T}) = unpack(IOBuffer(str), T)
+unpack!{T}(out::T, str::Union(String, Array{Uint8,1})) = unpack(IOBuffer(str), out)
 
 ## Alignment strategies and utility functions ##
 
